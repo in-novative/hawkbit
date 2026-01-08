@@ -26,24 +26,15 @@ permissions:
 jobs:
   reusable_workflow_verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # Prevent infinite builds
+    timeout-minutes: 30
     
-    # Concurrency control to cancel previous runs when new ones are triggered
+    # Concurrency control - cancel previous runs when new ones are triggered
     concurrency:
-      group: verify-${{ inputs.repository }}-${{ inputs.ref }}
+      group: ${{ github.workflow }}-${{ inputs.repository }}-${{ inputs.ref }}
       cancel-in-progress: true
-    
-    # Conditionally start services only when needed for full verification
-    services: 
-      rabbitmq: ${{ inputs.run_full_verification && (fromJson('{
-        "image": "rabbitmq:3-management-alpine",
-        "env": {
-          "RABBITMQ_DEFAULT_VHOST": "/",
-          "RABBITMQ_DEFAULT_USER": "guest",
-          "RABBITMQ_DEFAULT_PASS": "guest"
-        },
-        "ports": ["15672:15672", "5672:5672"]
-      }')) || null }}
+
+    # Conditionally include RabbitMQ service only when needed
+    services: ${{ inputs.run_full_verification && (fromJson('{"rabbitmq":{"image":"rabbitmq:3-management-alpine","env":{"RABBITMQ_DEFAULT_VHOST":"/","RABBITMQ_DEFAULT_USER":"guest","RABBITMQ_DEFAULT_PASS":"guest"},"ports":["15672:15672","5672:5672"]}}')) || null }}
 
     steps:
       - name: Parameters
@@ -54,23 +45,24 @@ jobs:
           echo "Full Verification: ${{ inputs.run_full_verification }}"
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
-          fetch-depth: 1 # Shallow clone to speed up checkout
-          submodules: false # Skip submodules unless needed
+          fetch-depth: 1  # Shallow clone
+          submodules: false  # Skip submodules
+          lfs: false  # Skip LFS files
 
       - name: Set up JDK
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: 21
-          cache: 'maven' # This handles Maven dependency caching automatically
+          cache: 'maven'  # Built-in caching
 
       - name: Check file license headers
         run: mvn license:check -PcheckLicense --batch-mode
-        continue-on-error: ${{ !inputs.run_full_verification }} # Continue on error if only running license check
+        continue-on-error: ${{ !inputs.run_full_verification }}
 
       - name: Run tests & javadoc
         if: ${{ inputs.run_full_verification }}
