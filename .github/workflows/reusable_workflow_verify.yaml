@@ -24,31 +24,30 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  reusable_workflow_verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     
-    services:
-      rabbitmq:
-        image: rabbitmq:3-management-alpine
-        env:
-          RABBITMQ_DEFAULT_USER: guest
-          RABBITMQ_DEFAULT_PASS: guest
-        ports:
-          - 5672:5672
-        # 简化健康检查，使用更可靠的命令
-        options: >-
-          --health-cmd "rabbitmq-diagnostics check_port_connectivity 5672"
-          --health-interval 5s
-          --health-timeout 2s
-          --health-retries 10
+    # 仅在需要时启动 RabbitMQ 服务
+    services: ${{ inputs.run_integration_tests && (fromJson('{
+      "rabbitmq": {
+        "image": "rabbitmq:3.12-management-alpine",
+        "env": {
+          "RABBITMQ_DEFAULT_USER": "guest",
+          "RABBITMQ_DEFAULT_PASS": "guest"
+        },
+        "ports": ["5672:5672"],
+        "options": "--health-cmd \"rabbitmqctl status\" --health-interval 10s --health-timeout 5s --health-retries 15 --health-start-period 20s"
+      }
+    }')) || {} }}
     
     steps:
       - name: Parameters
         run: |
-          echo "Repository: ${{ inputs.repository }},"
-          echo "Ref: ${{ inputs.ref }},"
+          echo "Repository: ${{ inputs.repository }}"
+          echo "Ref: ${{ inputs.ref }}"
           echo "Maven Properties: ${{ inputs.maven_properties }}"
+          echo "Run Integration Tests: ${{ inputs.run_integration_tests }}"
 
       - uses: actions/checkout@v6
         with:
@@ -61,32 +60,37 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: 21
-          cache: 'maven'  # 保持Maven缓存
+          cache: 'maven'  # 启用 Maven 依赖缓存
 
       - name: Cache local Maven repository
         uses: actions/cache@v5
         with:
           path: ~/.m2/repository
-          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}-${{ hashFiles('**/pom.xml') }}
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
           restore-keys: |
             ${{ runner.os }}-maven-
 
       - name: Check file license headers
+        # 快速检查放在前面，确保早期失败
         run: mvn license:check -PcheckLicense --batch-mode
 
       - name: Run unit tests
+        # 先运行单元测试，它们更快且不需要 RabbitMQ
         run: mvn test -DskipITs ${{ inputs.maven_properties }} --batch-mode
         
       - name: Run integration tests
+        # 仅在需要时运行集成测试
         if: ${{ inputs.run_integration_tests }}
         run: mvn verify -DskipUnitTests ${{ inputs.maven_properties }} --batch-mode
 
-      - name: Build artifacts
+      - name: Build project artifacts
+        # 仅在前面所有测试成功时构建
+        if: success()
         run: mvn package -DskipTests ${{ inputs.maven_properties }} --batch-mode
 
       - name: Upload test reports
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always()  # 即使测试失败也上传报告
         with:
           name: test-reports
           path: |
@@ -94,8 +98,9 @@ jobs:
             **/target/failsafe-reports
           retention-days: 7
 
-      - name: Upload artifacts
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
+        if: success()  # 仅当构建成功时上传
         with:
           name: build-artifacts
           path: '**/target/*.jar'
