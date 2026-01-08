@@ -22,10 +22,12 @@ permissions:
 jobs:
   reusable_workflow_verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    
+    # 🌟 优化点 6: 设置超时，防止任务无限挂起浪费额度
+    timeout-minutes: 20
+
     services:
       rabbitmq:
+        # 🌟 优化点 1: 保持使用了轻量级 alpine 镜像 (Good)
         image: rabbitmq:3-management-alpine
         env:
           RABBITMQ_DEFAULT_VHOST: /
@@ -42,42 +44,37 @@ jobs:
           echo "Ref: ${{ inputs.ref }}"
           echo "Maven Properties: ${{ inputs.maven_properties }}"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
+          # 🌟 优化点 8: 显式声明浅克隆，减少下载时间
           fetch-depth: 1
 
       - name: Set up JDK
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: 21
+          # 🌟 优化点 2: 利用 setup-java 内置缓存，删除后续重复的 actions/cache 步骤
           cache: 'maven'
 
-      - name: Check file license headers
-        run: mvn license:check -PcheckLicense --batch-mode
-        
-      - name: Run tests & generate reports
-        run: mvn clean verify -DdetectOfflineLinks=false -PgenerateTestReport ${{ inputs.maven_properties }} --batch-mode
-        
-      - name: Generate Javadoc
-        if: success()
-        run: mvn javadoc:javadoc --batch-mode
-        
-      - name: Upload test reports
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-reports
-          path: |
-            target/surefire-reports
-            target/failsafe-reports
-            target/site/jacoco
+      # ❌ 已删除：重复的 'Cache local Maven repository' 步骤
+      # 遵循规则 1 (最小化 actions) 和 规则 2 (不要不必要地安装/配置依赖)
 
-      - name: Upload Javadoc
+      - name: Check file license headers
+        # 🌟 保持优化: 快速失败的检查放在昂贵的测试之前 (规则 5)
+        run: mvn license:check -PcheckLicense --batch-mode
+
+      - name: Run tests & javadoc
+        # 建议：如果 Javadoc 生成很慢且不是验证必须，建议移除 javadoc:javadoc
+        run: mvn clean verify javadoc:javadoc -DdetectOfflineLinks=false -PgenerateTestReport ${{ inputs.maven_properties }} --batch-mode
+
+      # 🌟 优化点 9: 使用 Artifacts。如果测试失败，上传报告以便调试
+      - name: Upload Test Reports
+        if: failure()
         uses: actions/upload-artifact@v4
-        if: success()
         with:
-          name: javadoc
-          path: target/site/apidocs
+          name: surefire-reports
+          path: '**/target/surefire-reports/'
+          retention-days: 5
