@@ -14,99 +14,147 @@ on:
       maven_properties:
         type: string
         default: ''
-        description: 'Properties to pass to Maven command line'
-      skip_javadoc:
+        description: 'Properties to pass to Maven command line, e.g. -Djpa.vendor=hibernate'
+      run_integration_tests:
         type: boolean
-        default: true  # 默认跳过javadoc
-        description: 'Skip generating javadoc in CI builds'
-      use_rabbitmq:
-        type: boolean
-        default: false  # 默认不启动RabbitMQ
-        description: 'Only enable RabbitMQ if needed for integration tests'
+        default: true
+        description: 'Whether to run integration tests that require RabbitMQ'
 
 permissions:
   contents: read
 
 jobs:
-  reusable_workflow_verify:
+  # 拆分为三个并行任务，大幅缩短总执行时间
+  license-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 45  # 适当减少超时，促使优化
-    
-    # 条件化服务启动 - 仅在需要时启动RabbitMQ
-    services: ${{ inputs.use_rabbitmq && (fromJson('{
-      "rabbitmq": {
-        "image": "rabbitmq:3-management-alpine",
-        "env": {
-          "RABBITMQ_DEFAULT_VHOST": "/",
-          "RABBITMQ_DEFAULT_USER": "guest",
-          "RABBITMQ_DEFAULT_PASS": "guest"
-        },
-        "ports": ["15672:15672", "5672:5672"]
-      }
-    }')) || null }}
-
+    timeout-minutes: 10
     steps:
-      - name: Parameters
-        run: |
-          echo "Optimized workflow for ${{ inputs.repository }} @ ${{ inputs.ref }}"
-          echo "RabbitMQ enabled: ${{ inputs.use_rabbitmq }}"
-          echo "Javadoc generation: ${{ !inputs.skip_javadoc }}"
-
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
-          fetch-depth: 0  # 保持完整历史，license插件需要（可选优化点）
-          sparse-checkout: |
-            pom.xml
-            **/pom.xml
-            src/main/java
-            src/test/java
-            **/src/main/java
-            **/src/test/java
-
+          fetch-depth: 1
+      
       - name: Set up JDK
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: 21
           cache: 'maven'
-          # 关键：指定缓存依赖范围
-          cache-dependency-path: '**/pom.xml'
+      
+      - name: Check file license headers
+        run: mvn license:check -PcheckLicense --batch-mode -T 1C
 
-      - name: Cache Maven dependencies
-        uses: actions/cache@v3
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
         with:
-          path: |
-            ~/.m2/repository
-            **/target
-          # 优化缓存键：使用根pom.xml + 模块pom.xml哈希
-          key: ${{ runner.os }}-maven-${{ hashFiles('pom.xml', '**/pom.xml') }}
-          restore-keys: |
-            ${{ runner.os }}-maven-
-
-      - name: Single-pass build and test
-        run: |
-          # 合并所有操作到单个Maven命令
-          mvn -B -T 1C \
-            clean \
-            license:check -PcheckLicense \
-            verify \
-            ${{ inputs.skip_javadoc == false && 'javadoc:javadoc -DdetectOfflineLinks=false' || '' }} \
-            -PgenerateTestReport \
-            ${{ inputs.maven_properties }} \
-            -DskipITs=${{ !inputs.use_rabbitmq }}  # 根据RabbitMQ开关跳过集成测试
-        env:
-          MAVEN_OPTS: "-Xmx2048m -XX:+UseG1GC"  # 优化JVM参数
-
-      - name: Upload test reports
-        uses: actions/upload-artifact@v3
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+      
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 21
+          cache: 'maven'
+      
+      # 重用Maven依赖，但避免clean命令
+      - name: Run unit tests
+        run: mvn test -DskipITs ${{ inputs.maven_properties }} --batch-mode -T 2C
+      
+      - name: Upload unit test results
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-reports-${{ github.run_id }}
-          path: |
-            **/target/surefire-reports/*.xml
-            **/target/failsafe-reports/*.xml
-            **/target/site/jacoco/jacoco.xml
+          name: unit-test-reports
+          path: '**/target/surefire-reports'
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    # 仅当需要时才运行集成测试
+    if: ${{ inputs.run_integration_tests }}
+    
+    services:
+      rabbitmq:
+        image: rabbitmq:3-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        ports:
+          - 5672:5672
+        # 添加健康检查，避免等待完整启动
+        options: >-
+          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+      
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 21
+          cache: 'maven'
+      
+      # 预热依赖，避免在测试阶段下载
+      - name: Warm up dependencies
+        run: mvn dependency:resolve -DskipTests ${{ inputs.maven_properties }} --batch-mode
+      
+      - name: Run integration tests
+        run: mvn verify -DskipUnitTests ${{ inputs.maven_properties }} --batch-mode -T 1C
+      
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-reports
+          path: '**/target/failsafe-reports'
+
+  build-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [unit-tests, integration-tests]  # 仅在测试通过后构建
+    
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+      
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 21
+          cache: 'maven'
+      
+      # 复用已下载的依赖，仅构建不测试
+      - name: Build project and generate javadoc
+        run: mvn package javadoc:javadoc -DskipTests -DdetectOfflineLinks=false ${{ inputs.maven_properties }} --batch-mode -T 2C
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: '**/target/*.jar'
+      
+      - name: Upload Javadoc
+        uses: actions/upload-artifact@v4
+        with:
+          name: javadoc
+          path: '**/target/site/apidocs'
           retention-days: 7
-          if-no-files-found: ignore
