@@ -22,7 +22,7 @@ permissions:
 jobs:
   reusable_workflow_verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 设置合理的超时
+    timeout-minutes: 60
     
     services:
       rabbitmq:
@@ -38,43 +38,46 @@ jobs:
     steps:
       - name: Parameters
         run: |
-          echo "Repository: ${{ inputs.repository }},"
-          echo "Ref: ${{ inputs.ref }},"
+          echo "Repository: ${{ inputs.repository }}"
+          echo "Ref: ${{ inputs.ref }}"
           echo "Maven Properties: ${{ inputs.maven_properties }}"
 
       - uses: actions/checkout@v6
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
-          fetch-depth: 1  # 使用浅克隆提高速度
+          fetch-depth: 1
 
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: 21
-          cache: 'maven'  # 此设置已处理Maven依赖缓存
+          cache: 'maven'
 
       - name: Check file license headers
         run: mvn license:check -PcheckLicense --batch-mode
-
-      - name: Run tests & javadoc
-        if: success()  # 仅在前面的步骤成功时运行
-        run: mvn clean verify javadoc:javadoc -DdetectOfflineLinks=false -PgenerateTestReport ${{ inputs.maven_properties }} --batch-mode
+        
+      - name: Run tests & generate reports
+        run: mvn clean verify -DdetectOfflineLinks=false -PgenerateTestReport ${{ inputs.maven_properties }} --batch-mode
+        
+      - name: Generate Javadoc
+        if: success()
+        run: mvn javadoc:javadoc --batch-mode
         
       - name: Upload test reports
         uses: actions/upload-artifact@v4
-        if: always()  # 即使测试失败也上传报告
+        if: always()
         with:
           name: test-reports
           path: |
-            **/target/surefire-reports
-            **/target/failsafe-reports
-            **/target/site/jacoco
+            target/surefire-reports
+            target/failsafe-reports
+            target/site/jacoco
 
       - name: Upload Javadoc
         uses: actions/upload-artifact@v4
-        if: success()  # 仅当构建成功时上传
+        if: success()
         with:
           name: javadoc
-          path: '**/target/site/apidocs'
+          path: target/site/apidocs
