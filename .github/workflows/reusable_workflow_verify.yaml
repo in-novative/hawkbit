@@ -24,61 +24,9 @@ permissions:
   contents: read
 
 jobs:
-  # 拆分为三个并行任务，大幅缩短总执行时间
-  license-check:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          repository: ${{ inputs.repository }}
-          ref: ${{ inputs.ref }}
-          fetch-depth: 1
-      
-      - name: Set up JDK
-        uses: actions/setup-java@v5
-        with:
-          distribution: 'temurin'
-          java-version: 21
-          cache: 'maven'
-      
-      - name: Check file license headers
-        run: mvn license:check -PcheckLicense --batch-mode -T 1C
-
-  unit-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          repository: ${{ inputs.repository }}
-          ref: ${{ inputs.ref }}
-          fetch-depth: 1
-      
-      - name: Set up JDK
-        uses: actions/setup-java@v5
-        with:
-          distribution: 'temurin'
-          java-version: 21
-          cache: 'maven'
-      
-      # 重用Maven依赖，但避免clean命令
-      - name: Run unit tests
-        run: mvn test -DskipITs ${{ inputs.maven_properties }} --batch-mode -T 2C
-      
-      - name: Upload unit test results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: unit-test-reports
-          path: '**/target/surefire-reports'
-
-  integration-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    
-    # 仅当需要时才运行集成测试
-    if: ${{ inputs.run_integration_tests }}
+    timeout-minutes: 15
     
     services:
       rabbitmq:
@@ -88,73 +36,67 @@ jobs:
           RABBITMQ_DEFAULT_PASS: guest
         ports:
           - 5672:5672
-        # 添加健康检查，避免等待完整启动
+        # 简化健康检查，使用更可靠的命令
         options: >-
-          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd "rabbitmq-diagnostics check_port_connectivity 5672"
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 10
     
     steps:
+      - name: Parameters
+        run: |
+          echo "Repository: ${{ inputs.repository }},"
+          echo "Ref: ${{ inputs.ref }},"
+          echo "Maven Properties: ${{ inputs.maven_properties }}"
+
       - uses: actions/checkout@v6
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
-          fetch-depth: 1
-      
+          fetch-depth: 1  # 使用浅克隆提高速度
+
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: 21
-          cache: 'maven'
-      
-      # 预热依赖，避免在测试阶段下载
-      - name: Warm up dependencies
-        run: mvn dependency:resolve -DskipTests ${{ inputs.maven_properties }} --batch-mode
-      
+          cache: 'maven'  # 保持Maven缓存
+
+      - name: Cache local Maven repository
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Check file license headers
+        run: mvn license:check -PcheckLicense --batch-mode
+
+      - name: Run unit tests
+        run: mvn test -DskipITs ${{ inputs.maven_properties }} --batch-mode
+        
       - name: Run integration tests
-        run: mvn verify -DskipUnitTests ${{ inputs.maven_properties }} --batch-mode -T 1C
-      
-      - name: Upload integration test results
+        if: ${{ inputs.run_integration_tests }}
+        run: mvn verify -DskipUnitTests ${{ inputs.maven_properties }} --batch-mode
+
+      - name: Build artifacts
+        run: mvn package -DskipTests ${{ inputs.maven_properties }} --batch-mode
+
+      - name: Upload test reports
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: integration-test-reports
-          path: '**/target/failsafe-reports'
+          name: test-reports
+          path: |
+            **/target/surefire-reports
+            **/target/failsafe-reports
+          retention-days: 7
 
-  build-artifacts:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [unit-tests, integration-tests]  # 仅在测试通过后构建
-    
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          repository: ${{ inputs.repository }}
-          ref: ${{ inputs.ref }}
-          fetch-depth: 1
-      
-      - name: Set up JDK
-        uses: actions/setup-java@v5
-        with:
-          distribution: 'temurin'
-          java-version: 21
-          cache: 'maven'
-      
-      # 复用已下载的依赖，仅构建不测试
-      - name: Build project and generate javadoc
-        run: mvn package javadoc:javadoc -DskipTests -DdetectOfflineLinks=false ${{ inputs.maven_properties }} --batch-mode -T 2C
-      
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-artifacts
           path: '**/target/*.jar'
-      
-      - name: Upload Javadoc
-        uses: actions/upload-artifact@v4
-        with:
-          name: javadoc
-          path: '**/target/site/apidocs'
           retention-days: 7
